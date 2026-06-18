@@ -61,6 +61,19 @@ class CanonicalTable:
     def n_grid(self) -> int:
         return int(self.grid_us.shape[0])
 
+    def feature_names(self) -> dict[str, str]:
+        """Map each stream key -> a unique, export-safe feature name.
+
+        Uses the bare ``stream_id`` when it is unique across the table (so
+        single-device output is unchanged), and disambiguates with the device id
+        (``<device>.<stream>``) only when two devices expose the same stream id.
+        """
+        from collections import Counter
+        counts = Counter(s.stream_id for s in self.streams.values())
+        return {key: (s.stream_id if counts[s.stream_id] == 1
+                      else f"{s.device_id}.{s.stream_id}")
+                for key, s in self.streams.items()}
+
     def coverage_min(self) -> float:
         if not self.streams:
             return 1.0

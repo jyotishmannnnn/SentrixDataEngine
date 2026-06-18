@@ -42,11 +42,13 @@ def _validate_against_lerobot(info: dict) -> str:
 
 def _features(canonical: CanonicalTable) -> dict:
     feats: dict = {}
-    for s in canonical.streams.values():
-        feats[f"observation.{s.stream_id}"] = {
+    names = canonical.feature_names()
+    for key, s in canonical.streams.items():
+        name = names[key]
+        feats[f"observation.{name}"] = {
             "dtype": "float32", "shape": list(s.shape) or [1], "units": s.units,
         }
-        feats[f"observation.{s.stream_id}.confidence"] = {
+        feats[f"observation.{name}.confidence"] = {
             "dtype": "float32", "shape": [1], "units": "none"}
     feats.update({
         "timestamp": {"dtype": "float32", "shape": [1], "units": "s"},
@@ -74,10 +76,12 @@ class LeRobotExporter(Exporter):
         n = canonical.n_grid
 
         cols: dict[str, pa.Array] = {}
-        for s in canonical.streams.values():
+        names = canonical.feature_names()
+        for key, s in canonical.streams.items():
+            name = names[key]
             flat = s.flat_values()  # [n, width]
-            cols[f"observation.{s.stream_id}"] = pa.array(list(flat))  # list<float32> per row
-            cols[f"observation.{s.stream_id}.confidence"] = pa.array(
+            cols[f"observation.{name}"] = pa.array(list(flat))  # list<float32> per row
+            cols[f"observation.{name}.confidence"] = pa.array(
                 s.confidence.astype(np.float32))
         cols["timestamp"] = pa.array((canonical.grid_us / 1e6).astype(np.float32))
         cols["frame_index"] = pa.array(canonical.frame_index.astype(np.int64))

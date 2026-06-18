@@ -15,9 +15,10 @@ import numpy as np
 
 def summarize_canonical(table) -> dict:
     streams = {}
-    for s in table.streams.values():
+    names = table.feature_names()
+    for key, s in table.streams.items():
         vals = s.values[s.valid] if s.valid.any() else np.empty((0,))
-        streams[s.stream_id] = {
+        streams[names[key]] = {
             "device_id": s.device_id, "payload_kind": s.payload_kind,
             "shape": list(s.shape), "units": s.units, "kernel": s.kernel,
             "coverage": round(s.coverage(), 6),

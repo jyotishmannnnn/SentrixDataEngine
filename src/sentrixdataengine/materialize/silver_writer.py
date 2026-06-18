@@ -32,8 +32,9 @@ def build_arrow(table: CanonicalTable) -> pa.Table:
         "frame_index": pa.array(table.frame_index.astype(np.int64)),
     }
     stream_meta = {}
+    names = table.feature_names()
     for key, s in table.streams.items():
-        name = s.stream_id
+        name = names[key]
         data.update(_stream_columns(name, s))
         stream_meta[name] = {
             "key": key, "device_id": s.device_id, "payload_kind": s.payload_kind,

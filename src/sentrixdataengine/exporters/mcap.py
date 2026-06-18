@@ -35,10 +35,12 @@ class McapExporter(Exporter):
         with path.open("wb") as f:
             writer = Writer(f)
             writer.start()
+            names = canonical.feature_names()
             channels: dict[str, int] = {}
-            for s in canonical.streams.values():
+            for key, s in canonical.streams.items():
+                name = names[key]
                 schema_id = writer.register_schema(
-                    name=f"sentrix.{s.stream_id}", encoding="jsonschema",
+                    name=f"sentrix.{name}", encoding="jsonschema",
                     data=json.dumps({
                         "type": "object",
                         "properties": {
@@ -47,9 +49,14 @@ class McapExporter(Exporter):
                             "confidence": {"type": "number"},
                         }}).encode())
                 channels[s.key] = writer.register_channel(
-                    topic=s.stream_id, message_encoding="json", schema_id=schema_id)
+                    topic=name, message_encoding="json", schema_id=schema_id)
 
             grid = canonical.grid_us
+            # MCAP log_time is unsigned nanoseconds; reference time may start
+            # slightly negative under multi-device clock offsets, so shift to a
+            # non-negative, reference-relative base (spacing preserved). The true
+            # reference time is preserved verbatim in each message's t_ref_us.
+            t0 = int(grid.min()) if canonical.n_grid else 0
             sample_count = 0
             for s in canonical.streams.values():
                 flat = s.flat_values()
@@ -57,12 +64,12 @@ class McapExporter(Exporter):
                 for i in range(canonical.n_grid):
                     if not s.valid[i]:
                         continue
+                    log_ns = (int(grid[i]) - t0) * 1000
                     msg = {"t_ref_us": int(grid[i]),
                            "value": [float(x) for x in flat[i]],
                            "confidence": float(s.confidence[i])}
                     writer.add_message(
-                        channel_id=ch, log_time=int(grid[i]) * 1000,
-                        publish_time=int(grid[i]) * 1000,
+                        channel_id=ch, log_time=log_ns, publish_time=log_ns,
                         data=json.dumps(msg).encode())
                     sample_count += 1
             writer.finish()

@@ -31,9 +31,11 @@ class RldsExporter(Exporter):
         n = canonical.n_grid
 
         cols: dict[str, pa.Array] = {}
-        for s in canonical.streams.values():
-            cols[f"observation.{s.stream_id}"] = pa.array(list(s.flat_values()))
-            cols[f"observation.{s.stream_id}.confidence"] = pa.array(
+        names = canonical.feature_names()
+        for key, s in canonical.streams.items():
+            name = names[key]
+            cols[f"observation.{name}"] = pa.array(list(s.flat_values()))
+            cols[f"observation.{name}.confidence"] = pa.array(
                 s.confidence.astype(np.float32))
         # RLDS step scaffolding. reward/discount are neutral until a reward signal
         # exists upstream (Phase 3); the boundary flags are real.

@@ -46,12 +46,14 @@ class Hdf5Exporter(Exporter):
                                       (canonical.grid_us / 1e6).astype(np.float32),
                                       compression)
             sample_count = 0
-            for s in canonical.streams.values():
+            names = canonical.feature_names()
+            for key, s in canonical.streams.items():
+                name = names[key]
                 flat = s.flat_values().astype(np.float32)        # [n, width]
-                self._stream_to_resizable(obs, s.stream_id, flat, compression)
-                self._stream_to_resizable(obs, f"{s.stream_id}.confidence",
+                self._stream_to_resizable(obs, name, flat, compression)
+                self._stream_to_resizable(obs, f"{name}.confidence",
                                           s.confidence.astype(np.float32), compression)
-                self._stream_to_resizable(obs, f"{s.stream_id}.valid",
+                self._stream_to_resizable(obs, f"{name}.valid",
                                           s.valid.astype(np.uint8), compression)
                 sample_count += int(s.valid.sum())
             g.attrs["num_samples"] = n
