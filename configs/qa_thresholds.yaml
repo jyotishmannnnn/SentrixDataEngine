@@ -1,0 +1,18 @@
+# Dataset-level QA release-gate thresholds (mirrors manual Phase 7.3).
+# Bands are evaluated worst-first: hard_fail -> BLOCKED, else release/certified.
+hard_fail:
+  missing_frame_pct: 3.0       # >= -> BLOCKED
+  sync_resid_us: 5000.0        # >= -> BLOCKED  (5 ms)
+  coverage_min: 0.0            # (info) lower coverage handled via missing_frame_pct
+  label_confidence: 0.85       # mean confidence < -> BLOCKED
+  require_lineage_signed: true # unsigned lineage -> BLOCKED
+
+release:
+  missing_frame_pct: 1.0       # < required
+  sync_resid_us: 2000.0        # < required  (2 ms)
+  label_confidence: 0.90       # >= required
+
+certified:
+  missing_frame_pct: 0.2       # < required
+  sync_resid_us: 500.0         # < required  (0.5 ms)
+  label_confidence: 0.95       # >= required

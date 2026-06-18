@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentrixdataengine"
+version = "0.1.0"
+description = "Dataset materialization, export, validation and packaging for synchronized Sentrix sessions"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary (Internal Engineering)" }
+dependencies = [
+    "numpy>=1.26",
+    "pyarrow>=14",
+    "pyyaml>=6.0",
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+mcap = ["mcap>=1.1"]
+hdf5 = ["h5py>=3"]
+sign = ["cryptography>=42"]
+dev = ["pytest>=8", "mcap>=1.1", "h5py>=3", "cryptography>=42"]
+
+[project.scripts]
+sentrixdataengine = "sentrixdataengine.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sentrixdataengine = ["../configs/*.yaml", "../configs/dataset_profiles/*.yaml"]

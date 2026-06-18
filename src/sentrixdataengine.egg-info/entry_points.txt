@@ -1,0 +1,2 @@
+[console_scripts]
+sentrixdataengine = sentrixdataengine.cli:app

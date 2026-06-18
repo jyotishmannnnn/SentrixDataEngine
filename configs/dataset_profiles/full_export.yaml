@@ -1,0 +1,8 @@
+# Materialization profile: all V2 formats from one canonical session.
+formats: [lerobot, rlds, hdf5, mcap, parquet]
+format_options:
+  lerobot:
+    layout: v3
+  hdf5:
+    compression: gzip
+subframe_anchor_fps: null

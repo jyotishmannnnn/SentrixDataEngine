@@ -1,0 +1,15 @@
+numpy>=1.26
+pyarrow>=14
+pyyaml>=6.0
+typer>=0.9
+
+[dev]
+pytest>=8
+mcap>=1.1
+cryptography>=42
+
+[mcap]
+mcap>=1.1
+
+[sign]
+cryptography>=42

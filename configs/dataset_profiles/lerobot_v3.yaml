@@ -1,0 +1,6 @@
+# Materialization profile: LeRobot v3 shards (default).
+formats: [lerobot]
+format_options:
+  lerobot:
+    layout: v3
+subframe_anchor_fps: null     # set to video fps once a vision stream exists

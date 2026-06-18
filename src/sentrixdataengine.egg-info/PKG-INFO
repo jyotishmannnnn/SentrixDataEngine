@@ -1,0 +1,79 @@
+Metadata-Version: 2.4
+Name: sentrixdataengine
+Version: 0.1.0
+Summary: Dataset materialization, export, validation and packaging for synchronized Sentrix sessions
+License: Proprietary (Internal Engineering)
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.26
+Requires-Dist: pyarrow>=14
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: typer>=0.9
+Provides-Extra: mcap
+Requires-Dist: mcap>=1.1; extra == "mcap"
+Provides-Extra: sign
+Requires-Dist: cryptography>=42; extra == "sign"
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: mcap>=1.1; extra == "dev"
+Requires-Dist: cryptography>=42; extra == "dev"
+
+# SentrixDataEngine
+
+Dataset materialization, export, validation and packaging for **synchronized
+Sentrix sessions**. It is the consumer of SentrixSync's `SyncResult` / `Session`
+that turns an aligned, synchronized timeline into a versioned, validated,
+ML-ready, provenance-stamped dataset on disk.
+
+## Boundary
+
+- **Not** synchronization — SentrixSync owns clocks, grid, as-of join, confidence.
+- **Not** simulation — SentrixSim produces the raw device episodes.
+- Does **not** import SentrixSim; it reaches raw bytes only by resolving the
+  `payload_ref` URIs SentrixSync recorded.
+- Never mutates a `SyncResult`; the only write-back is appending an `ExportRecord`.
+
+It implements exactly what SentrixSync defers (payload resolution, aligned-table
+materialization, sub-frame bucketing materialization, multimodal export) plus the
+manual's Phase 5 (export), Phase 7.3 (release gate) and Phase 6.3a (provenance).
+
+## Pipeline
+
+```
+SyncResult (+ Session)
+  → resolve payloads      (resolve/)
+  → materialize Silver    (materialize/)  ← one canonical table; sub-frame [R,U,V]
+  → export Gold formats   (exporters/)    ← lerobot | mcap | parquet
+  → validate + release gate (validate/)
+  → package               (package/)      ← manifest, Merkle+signature, data card
+```
+
+## Use (Python)
+
+```python
+from pathlib import Path
+from sentrixdataengine import Pipeline, MaterializationRequest
+
+result = Pipeline().run(MaterializationRequest(
+    sync_result=sync_result,            # from sentrixsync.sync.engine.synchronize(...)
+    session=session,                    # sentrixsync Session (descriptors + stream_refs)
+    out_root=Path("gold"),
+    formats=("lerobot", "mcap"),
+))
+print(result.qa.gate_verdict)           # CERTIFIED | RELEASE | NEEDS_REVIEW | BLOCKED
+```
+
+## CLI
+
+```
+sentrixdataengine version
+sentrixdataengine formats
+sentrixdataengine validate --dataset gold/dataset=…/version=…
+```
+
+## Status
+
+V1: payload resolution (parquet), Silver canonical, LeRobot v3 + MCAP + Parquet
+exporters, validation + release gate, packaging with Merkle/Ed25519 provenance.
+V2: RLDS, HDF5, inspection/diff, MCAP payload resolver. V3: video/AV1, watermark,
+redaction seam, Rerun mirror.
