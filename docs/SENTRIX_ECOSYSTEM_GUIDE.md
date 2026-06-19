@@ -2,12 +2,15 @@
 
 **An internal architecture handbook for the Sentrix data-generation stack.**
 
-This document explains how the three repositories — **SentrixSim**, **SentrixSync**,
-and **SentrixDataEngine** — compose into a single pipeline that turns a simulated
-(eventually real) visuotactile glove into versioned, validated, ML-ready datasets.
-It documents the system *as implemented*, and maps it onto the long-term *Sentrix
-Physical Data Engine Architecture Manual* without inventing capability that does
-not yet exist.
+This document explains how the four repositories — **SentrixSim**, **SentrixCapture**,
+**SentrixSync**, and **SentrixDataEngine** — plus the shared **`sentrix_contracts`**
+layer compose into a single pipeline that turns a simulated *or real* visuotactile
+glove into versioned, validated, ML-ready datasets. The stack is **descriptor-driven**:
+one shared topology descriptor defines the sensor layout (count-agnostic, no Layout-B
+assumptions), both producers emit the same sensor-id-keyed raw artifact, and every
+dataset is provenance-closed back to its descriptor hash. It documents the system
+*as implemented*, and maps it onto the long-term *Sentrix Physical Data Engine
+Architecture Manual* without inventing capability that does not yet exist.
 
 > Audience: a new engineer who needs to understand the whole stack before touching
 > any one repo.
@@ -23,19 +26,33 @@ Related reading:
 ## Section 1 — Ecosystem Overview
 
 ```
-   ┌──────────────┐        ┌──────────────┐        ┌────────────────────┐
-   │  SentrixSim  │ ─────▶ │  SentrixSync │ ─────▶ │  SentrixDataEngine  │
-   └──────────────┘        └──────────────┘        └────────────────────┘
-   simulate ONE device      synchronize N devices    materialize + export +
-   → raw episode streams     → reference timeline +    validate + package
-     (parquet / mcap)          join indices + conf      → Silver + Gold datasets
+   topology descriptor (sentrix_contracts: Mark2_v1, …)
+        │
+        ▼
+   ┌──────────────┐
+   │  SentrixSim  │ ┐  synthetic producer
+   └──────────────┘ │
+   ┌──────────────┐ │   ┌──────────────┐        ┌────────────────────┐
+   │SentrixCapture│ ┴─▶ │  SentrixSync │ ─────▶ │  SentrixDataEngine  │ ─▶ derived features
+   └──────────────┘     └──────────────┘        └────────────────────┘
+   real-hardware         synchronize N devices    materialize + export +
+   producer (fw+host)    → reference timeline +    validate + package
+   → raw episode          join indices + conf      → Silver + Gold + provenance
+     (parquet/mcap)                                 (+ opt-in topology-dependent
+   both emit the SAME sensor-id-keyed artifact       derived-feature export)
 ```
 
 | Repo | Single responsibility | Input | Output |
 |---|---|---|---|
-| **SentrixSim** | Forward-simulate the Mark 2 glove | event configs, topology, parameter registry, seeds | per-device `Episode` → Parquet / MCAP / LeRobot files |
-| **SentrixSync** | Reconcile device clocks onto one timeline | device-local timestamps + sync events | in-memory `SyncResult` + `Session` manifest |
-| **SentrixDataEngine** | Turn a synchronized session into datasets | `SyncResult` + `Session` (+ payload refs) | Silver canonical Parquet + Gold exports + manifest + provenance |
+| **SentrixSim** | Forward-simulate a glove from a descriptor | event configs, topology **descriptor**, parameter registry, seeds | per-device `Episode` → Parquet / MCAP / LeRobot files |
+| **SentrixCapture** | Real-hardware producer (firmware + host capture) | live sensor wire stream (or a replayed Sim episode), topology descriptor | per-device raw `Episode` artifact + session manifest (byte-compatible with Sim) |
+| **SentrixSync** | Reconcile device clocks onto one timeline | device-local timestamps + sync events (+ opaque topology provenance) | in-memory `SyncResult` + `Session` manifest |
+| **SentrixDataEngine** | Turn a synchronized session into datasets | `SyncResult` + `Session` (+ payload refs) | Silver canonical Parquet + Gold exports (incl. derived) + manifest + provenance |
+
+The shared **`sentrix_contracts`** package (vendored in SentrixCapture) holds the one
+topology descriptor model, the raw-frame dataclasses + on-wire codec, the sensor-id
+column convention, and the bundled descriptors — depended on by Sim, Capture, and
+DataEngine so the layout is defined once.
 
 ### Why the repositories are separated
 
@@ -51,10 +68,11 @@ The separation is deliberate and load-bearing:
    code). SentrixDataEngine depends on SentrixSync's *types* (never SentrixSim).
    No repo reaches backwards.
 
-3. **Each layer is independently testable and swappable.** SentrixSim can be
-   replaced by a real hardware producer; SentrixSync stays identical because it
-   only sees descriptors + timestamps + payload refs. SentrixDataEngine stays
-   identical because it only sees a `SyncResult`.
+3. **Each layer is independently testable and swappable.** SentrixSim and the
+   real-hardware producer **SentrixCapture** are interchangeable: both emit the same
+   sensor-id-keyed raw artifact behind Sync's adapter contract, so SentrixSync stays
+   identical (it only sees descriptors + timestamps + payload refs) and
+   SentrixDataEngine stays identical (it only sees a `SyncResult`).
 
 4. **The "two moats" discipline (manual §0).** The manual says build only the
    Physical Data Engine and the catalog; rent commodity layers. Keeping
@@ -65,9 +83,12 @@ The separation is deliberate and load-bearing:
 
 ## Section 2 — SentrixSim
 
-**Purpose.** A forward-model simulator for the Sentrix Mark 2 visuotactile glove
-(21× BMM350 magnetometers + 3× LIS2DTW12 accel/temp sensors). Python 3.11,
-numpy/scipy/pyarrow/mcap/pydantic.
+**Purpose.** A forward-model simulator for the Sentrix Mark 2 visuotactile glove.
+The sensor layout is **descriptor-driven**: `simulate(... descriptor=...)` loads a
+shared `sentrix_contracts` topology descriptor (default the bundled `Mark2_v1` =
+21× BMM350 + 3× LIS2DW12) and builds topology via `topology.from_descriptor`; counts
+come from the descriptor, so a different layout is a different descriptor with no code
+change. Python 3.11, numpy/scipy/pyarrow/mcap/pydantic, sentrix_contracts.
 
 ### Architecture — an L0→L7 forward pipeline
 
@@ -75,9 +96,9 @@ numpy/scipy/pyarrow/mcap/pydantic.
 |---|---|---|---|
 | L0 | `events/generator.py` | Ground-truth force/kinematics from an event YAML on a 1600 Hz master grid | `GroundTruth` |
 | L1 | `layers/l1_contact.py` | Normalized contact wrench → magnet kinematics (lumped compliance) | `Deformation` |
-| L2 | `layers/l2_field.py` | Dipole 1/r³ magnetic-field model | `B_true[T,21,3]` µT |
+| L2 | `layers/l2_field.py` | Dipole 1/r³ magnetic-field model (sensor positions from the descriptor) | `B_true[T,n_mag,3]` µT |
 | L3 | `layers/l3_bmm350.py` | BMM350 model: noise, saturation, quantization, dropout | `B_read_uT`, `B_lsb`, `sat_flag`, `dropout` |
-| L4 | `layers/l4_lis2dtw12.py` | LIS2DTW12 accel + temperature model | `accel_read_g`, `temp_read_c` |
+| L4 | `layers/l4_lis2dtw12.py` | LIS2DW12 accel + temperature model (dynamics sites from the descriptor) | `accel_read_g`, `temp_read_c` |
 | L5 | `layers/l5_noise_drift.py` | Gaussian noise + per-episode static drift | `NoiseModel` |
 | L6 | `layers/l6_sync.py` | Master-grid assembly, zero-order hold (latest-at) | `aligned` dict |
 | L7 | `layers/l7_export/` | Export to Parquet / MCAP / LeRobot | files |
@@ -91,16 +112,17 @@ duration:
 @dataclass
 class Episode:
     name: str                          # e.g. "tap__d0_n0_r0"
-    meta: dict[str, Any]               # seed, duration_s, physics_fidelity, units, rates
+    meta: dict[str, Any]               # seed, duration_s, physics_fidelity, units, rates,
+                                       #   descriptor_version, descriptor_hash, bmm_sensor_ids, lis_sensor_ids
     t_master_us: np.ndarray            # (T,) int64 microseconds
-    aligned: dict[str, np.ndarray]     # B_read_uT[T,21,3], accel_read_g[T,3,3], temp_read_c[T,3], masks, phase_id
+    aligned: dict[str, np.ndarray]     # B_read_uT[T,n_mag,3], accel_read_g[T,n_dyn,3], temp_read_c[T,n_dyn], masks, phase_id
     labels: dict[str, np.ndarray]      # label.* (ground truth) + est.* (estimates) per finger
     label_meta: dict[str, dict]        # {source, units, confidence, tier}
     provenance: list[dict]             # full parameter table
 ```
 
 A **sample** is one row on the master grid at index `t` (1600 Hz → 625 µs spacing):
-a timestamp plus B-field (21×3), tripod accel (3×3), temp (3), phase, labels.
+a timestamp plus B-field (n_mag×3), dynamics accel (n_dyn×3), temp (n_dyn), phase, labels.
 
 ### Sensor models (fidelity discipline)
 
@@ -112,9 +134,12 @@ magnitudes are "relative/shape-only" presentation scales unless run with
 
 ### Supported exports (`layers/l7_export/`)
 
-- **Parquet** (`parquet.py`) — one flat table per episode: `t_master_us`, 63
-  flattened tactile columns `tactile.bNN.{bx,by,bz}_uT`, 9 accel `dyn.{thumb,index,middle}.{ax,ay,az}_g`,
-  3 temp, validity masks, `phase_id`, `label.*`/`est.*`; schema-level JSON metadata.
+- **Parquet** (`parquet.py`) — one flat table per episode: `t_master_us`, sensor-id-keyed
+  tactile columns `mag.<sensor_id>.{bx,by,bz}_uT`, accel `dyn.<sensor_id>.{ax,ay,az}_g`,
+  per-dynamics-site `dyn.<sensor_id>.temp_c`, validity masks, `phase_id`, `label.*`/`est.*`;
+  schema-level JSON metadata (incl. `descriptor_version/hash`, `bmm_sensor_ids`,
+  `lis_sensor_ids`). Legacy Layout-B names (`tactile.bNN` / `dyn.<finger>`) only with
+  `--legacy-columns`. (Mark2_v1 → 63 tactile + 9 accel + 3 temp columns.)
 - **MCAP** (`mcap.py`) — 3 JSON channels: `tactile_field` (400 Hz), `dynamics_accel`
   (1600 Hz), `dynamics_temp` (50 Hz).
 - **LeRobot v3** (`lerobot.py` single-episode, `lerobot_dataset.py` multi-episode
@@ -123,7 +148,8 @@ magnitudes are "relative/shape-only" presentation scales unless run with
 ### CLI
 
 ```
-sentrixsim simulate --event tap --out ./out --formats parquet,mcap,lerobot
+sentrixsim simulate --event tap --out ./out --formats parquet,mcap,lerobot \
+    [--descriptor Mark2_v1] [--legacy-columns]
 sentrixsim simulate-all --out ./out
 sentrixsim build-dataset --out ./out [--n-noise 5 --n-drift 4 --hard-mode]
 sentrixsim list-events
@@ -136,11 +162,13 @@ sentrixsim show-params [--tier KNOWN|ESTIMATED|UNKNOWN]
 SentrixSim/
 ├── src/sentrixsim/
 │   ├── cli.py  core_types.py  pipeline.py  dataset.py  decode.py  topology.py  hardmode.py
+│   │      # topology.py: from_descriptor(Descriptor) → Topology (the descriptor-driven path)
 │   ├── params/registry.py            # KNOWN/ESTIMATED/UNKNOWN tiering
-│   ├── events/generator.py           # L0 ground truth
+│   ├── events/generator.py           # L0 ground truth (dynamics fingers from the descriptor)
 │   └── layers/l1..l6 + l7_export/{schema,parquet,mcap,lerobot,lerobot_dataset}.py
 ├── configs/{parameters,topology_layoutB,scene_default,scene_hard}.yaml + events/*.yaml (9 gestures)
-└── tests/
+│      # topology_layoutB.yaml is the generator source for the bundled Mark2_v1 descriptor
+└── tests/    # depends on sentrix_contracts for the bundled descriptor
 ```
 
 ### Limitations (relevant downstream)
@@ -149,6 +177,38 @@ Single-device only; no absolute physics (magnitudes are scales); no vision strea
 exporters are **single-device, single-episode** — unaware of multi-device
 synchronization, confidence masks, or sub-frame bucketing. This is precisely why a
 separate materialization engine exists.
+
+---
+
+## Section 2.5 — SentrixCapture
+
+**Purpose.** The real-hardware producer SentrixSim was always a stand-in for: it turns
+a physical Mark 2 glove into the same per-device raw episode artifact. It owns the
+RP2350 firmware, the USB wire transport, device descriptors + calibration bundles,
+session manifests, capture-time QA, and raw recording — everything between silicon and
+SentrixSync's adapter contract.
+
+**Shared wire contract.** The `sentrix_contracts.wire` codec (framing
+`MAGIC|VER|LEN|payload|CRC32` over packed `sentrix_frame.h` structs) is the single
+source of truth for the on-wire bytes; a `WireMap` maps the u16 wire index ↔ string
+`sensor_id` from the descriptor. The firmware (`firmware/`, RP2350 + Pico SDK:
+`wire.c`, sensor drivers, `acquire.c`, `usb.c`, `strobe.c`, `health.c`, `config.c`,
+`main.c`) emits byte-identical packets; a host parity test pins the contract.
+
+**Host path (real, tested).** `transport.read_stream` decodes a (chunked/live) byte
+source → `capture.py` buckets field/sync/health frames → `record.py` writes
+`raw.parquet` (sensor-id-keyed, self-describing KV metadata) plus
+`sync_evidence.parquet`, `health.parquet`, a descriptor snapshot, and the session
+manifest. `devicesim.py` replays a real Sim episode over the real wire, so the whole
+host path runs hardware-free. CLI: `sentrixcapture record --from-sim <episode.parquet>
+--descriptor Mark2_v1 --session sNNN --out <dir>`.
+
+**Status.** Host capture path + wire codec are real and tested (12 tests); verified
+end-to-end (Sim → wire → host → `raw.parquet`, ingested unchanged by SentrixSync and
+DataEngine, values bit-faithful). Firmware is real C with on-silicon bring-up pending
+(PIO I3C buses, USB enumeration); the live USB backend and camera capture are wired
+seams. The output is byte-compatible with SentrixSim, so everything downstream is
+identical.
 
 ---
 
@@ -181,10 +241,13 @@ are flagged, not fabricated; confidence has three separate components. The core
 
 `ingest/adapter.py` defines the `DeviceAdapter` ABC (`descriptor/open/close/read/read_batch`,
 optional `stream_ref`/`ground_truth`). `SentrixSimAdapter.from_parquet(path, descriptor,
-ts_column="t_master_us")` wraps a SentrixSim Parquet episode and emits samples whose
-`payload_ref` looks like `parquet:///abs/path#stream=tactile_field&row=12`. This
-adapter is the **only** connection point between Sim and Sync; it reads Sim output,
-never imports Sim.
+ts_column=...)` wraps a producer Parquet episode (`ts_column="t_master_us"` for
+SentrixSim, `"t_capture_us"` for SentrixCapture — both emit the same sensor-id-keyed
+artifact) and emits samples whose `payload_ref` looks like
+`parquet:///abs/path#stream=tactile_field&row=12`. It reads producer output, never
+imports a producer. It also **auto-fills opaque topology provenance**
+(`topology_ref`/`topology_hash`) onto the descriptor from the file's KV metadata —
+carried verbatim, never used for synchronization.
 
 ### Detectors
 
@@ -244,9 +307,11 @@ class SyncResult:
 ```
 
 A **`Session`** (`core/session.py`) is the persistent manifest: `metadata`,
-`devices` (each `DeviceRegistration` with a `DeviceDescriptor` + `stream_refs`),
+`devices` (each `DeviceRegistration` with a `DeviceDescriptor` + `stream_refs`; the
+descriptor may carry opaque `topology_ref`/`topology_hash` provenance),
 `calibration_refs`, `timeline: TimelineRef`, `sync_report`, `validation_report`,
-`exports: list[ExportRecord]`, `ground_truth`.
+`exports: list[ExportRecord]`, `ground_truth`. Versions: `SCHEMA_VERSION 0.3.0`,
+`CONTRACT_VERSION 1.1.0`, `SENTRIXSYNC_VERSION 0.4.0`.
 
 ### QA
 
@@ -277,14 +342,14 @@ repository: it consumes `SyncResult`/`Session` and emits datasets.
 
 | Layer | Module | Responsibility |
 |---|---|---|
-| **Payload resolution** | `resolve/` | `payload_ref` URI → ndarray (`parquet`, `file`, `mcap` schemes) |
+| **Payload resolution** | `resolve/` | `payload_ref` URI → ndarray. **Self-describing / topology-driven**: reads `bmm_sensor_ids`/`lis_sensor_ids` from the producer parquet's KV metadata and builds sensor-id-keyed columns (`mag.<sid>.*` / `dyn.<sid>.*`); any sensor count resolves with no code change; legacy `tactile.bNN` via fallback. (`parquet`, `file`, `mcap`) |
 | **Materialization** | `materialize/projector.py` | apply `StreamAlignment` join indices to resolved payloads |
 | **Canonical Silver** | `materialize/{canonical,silver_writer}.py` | one `CanonicalTable` → one Silver Parquet (the source of truth) |
 | **Sub-frame bucketing** | `materialize/subframe.py` | `[R,*shape]` tactile burst per anchor frame (reuses Sync's index logic) |
 | **Confidence fold** | `materialize/confidence.py` | carry source/clock/interp + export scalar |
-| **Exporters** | `exporters/` | project canonical → LeRobot / RLDS / HDF5 / MCAP / Parquet |
+| **Exporters** | `exporters/` | project canonical → LeRobot / RLDS / HDF5 / MCAP / Parquet; **`derived`** (opt-in) projects topology-dependent features from the descriptor's spatial parts |
 | **Validation** | `validate/` | schema/timeline/metadata/confidence + `release_gate` |
-| **Packaging** | `package/` | Gold layout, manifest, Merkle+Ed25519 provenance, data card, content hash |
+| **Packaging** | `package/` | Gold layout, manifest, Merkle+Ed25519 provenance, data card, content hash; **topology provenance** (`{device_id, topology_ref, topology_hash}`) stamped into Silver KV + manifest + signed sidecar + datacard |
 | **Hooks** | `hooks/` | authorize / watermark seams (local no-ops; Phase-4 later) |
 
 **Boundary mechanics:** imports SentrixSync types read-only; never imports SentrixSim;
@@ -371,8 +436,14 @@ gold/dataset=<id>/version=0.1.0/
 ├── format=rlds/     steps.parquet  episode_metadata.json
 ├── format=hdf5/     dataset.hdf5
 ├── format=parquet/  part-000.parquet
+├── format=derived/  part-000.parquet      # only when "derived" is in formats (opt-in)
 ├── manifest.json  provenance.sidecar.json  DATACARD.md  qa_report.json
 ```
+
+`manifest.json`, the Merkle-signed `provenance.sidecar.json`, the Silver KV metadata,
+and `DATACARD.md` all carry the per-device topology provenance
+(`{device_id, topology_ref, topology_hash}`), so a dataset traces back to the exact
+hardware-revision descriptor it was produced under.
 
 ---
 
@@ -390,10 +461,11 @@ L2 field:         dipole 1/r³ → B_true[t, 5, 2]  (cluster 5, z-axis, µT)
 L3 BMM350:        + drift + Gaussian noise → clip ±2000 µT → quantize 0.1 µT
                   → B_read_uT[t, 5, 2]
 L6 sync:          held onto the 1600 Hz master grid
-L7 parquet:       column  tactile.b05.bz_uT  at row t
+L7 parquet:       column  mag.<sensor_id>.bz_uT  at row t   (sensor_id from the descriptor)
 ```
 
-The written cell is `episode.parquet[row=t]["tactile.b05.bz_uT"] = <float32 µT>`.
+The written cell is `episode.parquet[row=t]["mag.bmm_index_2.bz_uT"] = <float32 µT>`
+(the descriptor's 6th magnetic sensor; `--legacy-columns` would write `tactile.b05.bz_uT`).
 
 ### 2. SentrixSync — reference, not value
 
@@ -416,8 +488,9 @@ with `weight[i]`), it is valid, and here is how much to trust it."
 ### 3. SentrixDataEngine — resolve, apply, carry
 
 ```
-ParquetPayloadResolver.resolve_stream(base_uri, "bmm350_cluster_uT", (21,3)):
-    reads tactile.b00..b20 {bx,by,bz} columns → payload[N, 21, 3]   (b05/bz lives at [:,5,2])
+ParquetPayloadResolver.resolve_stream(base_uri, "bmm350_cluster_uT", (n_mag,3)):
+    reads bmm_sensor_ids from the file's KV metadata → mag.<sid>.{bx,by,bz} columns
+    → payload[N, n_mag, 3]   (the index-5 sensor's bz lives at [:,5,2])
 projector._apply_alignment (CONTINUOUS):
     values[i, 5, 2] = payload[source_index[i], 5, 2] * (1-weight[i])
                     + payload[next_index[i],   5, 2] *   weight[i]      (where valid)
@@ -461,6 +534,19 @@ generation; convenience single-device exporters; Hard Mode augmentations.
 import of SentrixSync or SentrixDataEngine; cross-device timeline logic; dataset
 catalog/validation/packaging concerns; resolving another producer's payload refs.
 
+### SentrixCapture — belongs / forbidden
+
+**Belongs:** RP2350 firmware; USB wire transport + the shared on-wire codec; device
+discovery; device descriptors + per-unit calibration bundles; capture-time QA;
+session manifests; raw recording (sensor-id-keyed, device-local timestamps, raw
+absolute field). Depends only on `sentrix_contracts`.
+
+**Must never be added:** clock reconciliation (records device-local timestamps + raw
+sync evidence only); dataset materialization/export/validation/packaging; baseline
+subtraction / calibration application / fusion at the edge (calibration is stored,
+never applied); persisting derived signals as canonical data; importing SentrixSync
+or SentrixDataEngine.
+
 ### SentrixSync — belongs / forbidden
 
 **Belongs:** ingestion adapters; sync-event detectors; clock estimation
@@ -493,18 +579,26 @@ fabricating values across a flagged gap.
 
 ### Implemented
 
-- **SentrixSim:** full L0–L7 forward pipeline; 9 gestures; KNOWN/ESTIMATED/UNKNOWN
-  tiering; Parquet/MCAP/LeRobot (single + multi-episode) exporters; Hard Mode; CLI.
-- **SentrixSync:** ingest adapters incl. `SentrixSimAdapter`; TactileTap/VisualFlash
+- **SentrixSim** (23 tests): full L0–L7 forward pipeline; 9 gestures;
+  KNOWN/ESTIMATED/UNKNOWN tiering; **descriptor-driven topology** (counts from the
+  descriptor, value-identical default `Mark2_v1`); **sensor-id-keyed** Parquet
+  (legacy via `--legacy-columns`); MCAP/LeRobot exporters; Hard Mode; CLI.
+- **SentrixCapture** (12 tests): shared `sentrix_contracts.wire` codec; device
+  simulator; host decode → record → session manifest; raw artifact byte-compatible with
+  Sim; RP2350 firmware (Pico SDK) mirroring the wire contract (byte-parity anchored).
+  Firmware on-silicon bring-up + live USB backend pending.
+- **SentrixSync** (215 tests): ingest adapters (Sim + Capture); TactileTap/VisualFlash
   detectors; TLS/RANSAC/identity clock models; graph reconciliation; reference grid
   + as-of join; three-component confidence; sync-level QA; `Session`/`SyncResult`
-  schemas + manifest I/O.
-- **SentrixDataEngine (V1+V2):** payload resolution (`parquet`/`file`/`mcap`);
-  canonical Silver materialization + Silver Parquet; sub-frame bucketing capability;
-  exporters LeRobot (v2/v3), MCAP, RLDS, HDF5, Parquet; schema/timeline/metadata/
-  confidence validation + release gate; packaging with Merkle + Ed25519 provenance,
+  schemas + manifest I/O; opaque topology provenance (never consumed).
+  Contract 1.1.0 / framework 0.4.0.
+- **SentrixDataEngine (V1+V2)** (41 tests): **self-describing topology-driven**
+  payload resolution; canonical Silver materialization + Silver Parquet; sub-frame
+  bucketing capability; exporters LeRobot (v2/v3), MCAP, RLDS, HDF5, Parquet, and
+  opt-in **`derived`** (topology-dependent features); validation + release gate;
+  packaging with Merkle + Ed25519 provenance, **topology-provenance closure**,
   content-hash reproducibility, data card, `ExportRecord` write-back; `inspect`/`diff`
-  CLI. **24 tests passing.**
+  CLI.
 
 ### Partially implemented
 
@@ -536,9 +630,11 @@ The implemented stack is the first three layers of the manual's ten-phase
 ```
    IMPLEMENTED TODAY                         MANUAL ROADMAP (future)
    ─────────────────                         ───────────────────────
-   SentrixSim  ───────────────────────────▶  Physical hardware capture
-   (synthetic glove)                          (Mark 2 glove + ego camera; PTP/SMPTE sync)
-        │                                          swaps in behind the SAME adapter contract
+   SentrixSim  +  SentrixCapture  ─────────▶  Physical hardware capture, on silicon
+   (synthetic glove)  (real producer:          (Mark 2 glove + ego camera; PTP/SMPTE sync)
+    host real+tested,                            firmware bring-up + live USB pending;
+    fw bring-up pending)                         both producers share ONE adapter contract
+        │
         ▼
    SentrixSync  ──────────────────────────▶  Phase 2.1 ingestion & hardware sync
    (clock reconciliation, timeline)            (real multi-device, real evidence tiers)
@@ -557,10 +653,12 @@ The implemented stack is the first three layers of the manual's ten-phase
 
 **How the pieces connect to the vision without overreach:**
 
-- **Simulation → physical hardware.** SentrixSim exists so the rest of the stack
-  can be built and validated before silicon. Because SentrixSync only consumes a
-  `DeviceDescriptor` + timestamps + payload refs, a real glove/camera producer
-  replaces the simulator with **no change** to Sync or DataEngine.
+- **Simulation → physical hardware.** SentrixSim let the rest of the stack be built
+  and validated before silicon; the real producer now exists as **SentrixCapture**
+  (host capture path real and tested, firmware real with on-silicon bring-up pending).
+  Because SentrixSync only consumes a `DeviceDescriptor` + timestamps + payload refs,
+  and both producers emit the same sensor-id-keyed artifact, Capture swaps in with
+  **no change** to Sync or DataEngine.
 
 - **Synchronization → the manual's ingestion/sync phase.** SentrixSync already
   implements the affine clock model, evidence tiers (PTP / shared-event / wall-clock),
@@ -574,7 +672,7 @@ The implemented stack is the first three layers of the manual's ten-phase
   later without re-architecting.
 
 - **What stays out, on purpose.** Autolabeling (Phase 3) and the catalog (Phase 4)
-  are the two declared moats and are *not* in any of these three repos. Training
+  are the two declared moats and are *not* in any of these repos. Training
   systems consume the Gold datasets but live entirely outside the stack. Keeping
   them out is what makes the boundaries in Section 7 enforceable.
 

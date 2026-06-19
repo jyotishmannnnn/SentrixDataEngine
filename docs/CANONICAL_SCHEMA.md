@@ -10,7 +10,8 @@ this representation. Frozen contract; bump `schema_version` on change.
 - `frame_index: int64[n_grid]`
 - `streams: dict[key -> CanonicalStream]` where `key = "device::stream"`
 - `reference_clock_id, grid_rate_hz, session_id, schema_version`
-- `extra: dict` — `source_episode_hashes`, passthrough labels
+- `extra: dict` — `source_episode_hashes`, `topology` (per-device
+  `{device_id, topology_ref, topology_hash}`), passthrough labels
 
 `CanonicalStream`
 - `key, device_id, stream_id, payload_kind, units, kernel`
@@ -33,6 +34,12 @@ File-level KV metadata:
 - `sentrixdataengine_schema_version`, `session_id`, `reference_clock_id`,
   `grid_rate_hz`, `streams` (JSON shape/units/kernel/coverage map),
   `source_episode_hashes` (JSON list)
+- `topology` (JSON list) — per-device `{device_id, topology_ref, topology_hash}`
+  carried from each `DeviceDescriptor`, recording the exact hardware-revision
+  descriptor each device's streams were produced under. The same triple is mirrored
+  into `manifest.json`, the Merkle-signed `provenance.sidecar.json`, and the data
+  card (`## Topology`), so the dataset → descriptor → hardware-revision lineage is
+  provenance-closed.
 
 ## Invariants
 

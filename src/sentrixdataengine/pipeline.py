@@ -85,6 +85,27 @@ class Pipeline:
         return sources
 
     @staticmethod
+    def _topology_provenance(session) -> list[dict]:
+        """Per-device topology descriptor provenance carried from SentrixSync
+        (DeviceDescriptor.topology_ref/topology_hash — opaque, set by the producer).
+        Lets a dataset be traced back to the exact hardware-revision descriptor.
+        Devices that declare neither are omitted."""
+        if session is None:
+            return []
+        out = []
+        for reg in session.devices:
+            d = reg.descriptor
+            if d is None:
+                continue
+            ref = getattr(d, "topology_ref", None)
+            ho = getattr(d, "topology_hash", None)
+            if ref is None and ho is None:
+                continue
+            out.append({"device_id": reg.device_id,
+                        "topology_ref": ref, "topology_hash": ho})
+        return sorted(out, key=lambda x: x["device_id"])
+
+    @staticmethod
     def _source_hashes(payload_sources: dict[str, str]) -> list[str]:
         hashes = set()
         for uri in payload_sources.values():
@@ -110,6 +131,7 @@ class Pipeline:
         canonical = project(sr, descriptors, self.registry, payload_sources,
                             session_id=session_id, schema_version=SCHEMA_VERSION)
         canonical.extra["source_episode_hashes"] = self._source_hashes(payload_sources)
+        canonical.extra["topology"] = self._topology_provenance(req.session)
 
         dataset_id = req.dataset_id or derive_dataset_id(session_id)
         spec = DatasetSpec(
@@ -144,6 +166,7 @@ class Pipeline:
             gold_files, layout.provenance_path, dataset_id=dataset_id,
             version=req.version, session_id=session_id, schema_version=SCHEMA_VERSION,
             source_episode_hashes=canonical.extra["source_episode_hashes"],
+            topology=canonical.extra["topology"],
             customer_id=req.customer_id)
         wm = watermark(customer_id=req.customer_id, dataset_id=dataset_id)
 
@@ -151,7 +174,8 @@ class Pipeline:
         layout.qa_path.write_text(_json(qa.__dict__), encoding="utf-8")
 
         chash = content_hash(gold_files)
-        write_manifest(layout.manifest_path, spec, exports, qa, prov, content_hash=chash)
+        write_manifest(layout.manifest_path, spec, exports, qa, prov, content_hash=chash,
+                       topology=canonical.extra["topology"])
         write_datacard(layout.datacard_path, spec, canonical, exports, qa, prov)
 
         append_export_record(

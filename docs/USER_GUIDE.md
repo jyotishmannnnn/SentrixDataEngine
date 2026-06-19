@@ -14,9 +14,11 @@ A `sentrixsync.core.session.Session` — the manifest describing a synchronized
 capture/generation: its `metadata` (id, origin, grid rate, rejection tolerance),
 its `devices` (each a `DeviceRegistration` holding a `DeviceDescriptor` and
 `stream_refs`), and pointers to timeline/reports/exports. SentrixDataEngine reads
-two things from it: the **device descriptors** (for each stream's `payload_kind`,
-`payload_shape`, `units`, `kernel`) and the **`stream_refs`** (the payload base
-URIs). It writes back exactly one thing: an `ExportRecord` per produced format.
+from it: the **device descriptors** (for each stream's `payload_kind`,
+`payload_shape`, `units`, `kernel`, plus the descriptor's `topology_ref` /
+`topology_hash` carried into dataset provenance) and the **`stream_refs`** (the
+payload base URIs). It writes back exactly one thing: an `ExportRecord` per produced
+format.
 
 ### SyncResult
 The in-memory output of `sentrixsync.sync.engine.synchronize(...)`. The engine
@@ -34,6 +36,16 @@ resolves these via the `resolve/` layer. Supported schemes today: `parquet`,
 `file`, `mcap`. The fragment (`#stream=..&row=..`) is stripped to get the stream
 base URI; the resolver reads the whole stream once and indexes rows via the join.
 
+The Parquet resolver is **self-describing**: it reads each producer file's
+per-modality sensor order from KV metadata (`sentrixsim_meta` / `sentrix_capture_meta`
+→ `bmm_sensor_ids` / `lis_sensor_ids`) and builds sensor_id-keyed columns
+(`mag.<sensor_id>.{bx,by,bz}_uT`, `dyn.<sensor_id>.{ax,ay,az}_g`,
+`dyn.<sensor_id>.temp_c`). The `payload_kind` selects the modality; the column set
+and order come from the file, so any sensor count resolves with no code change.
+Pre-migration fixed-column datasets (`tactile.bNN.*` / `dyn.<finger>.*`) are still
+read via a fallback. Both SentrixSim and SentrixCapture (real hardware) emit the
+same self-describing artifact.
+
 ### Canonical Silver
 The single internal source of truth: a `CanonicalTable` (`materialize/canonical.py`)
 holding the reference `grid_us`, a `frame_index`, and per-stream `CanonicalStream`
@@ -42,8 +54,9 @@ and confidence arrays. It is written to `silver/aligned/part-000.parquet`. Every
 Gold export is a pure projection of this table — never of the timeline directly.
 
 ### Gold Exports
-The target formats projected from Silver: LeRobot, RLDS, HDF5, MCAP, Parquet. Each
-lives under `format=<fmt>/` in the dataset version directory.
+The target formats projected from Silver: LeRobot, RLDS, HDF5, MCAP, Parquet, and
+the opt-in `derived` exporter. Each lives under `format=<fmt>/` in the dataset
+version directory.
 
 ### QA Gates
 `validate/release_gate.py` composes integrity + quality + property checks into one
@@ -150,7 +163,29 @@ Writes `format=hdf5/dataset.hdf5` with `data/demo_0/obs/<stream>` (resizable,
 chunked, compressed), `<stream>.confidence`, `<stream>.valid`, `timestamp`, and
 `num_samples` / `total` attrs.
 
-### Workflow 6 — Inspect a dataset
+### Workflow 6 — Export derived features (opt-in)
+
+The `derived` exporter is the only component that consumes the topology
+descriptor's **spatial** layout (sensor positions, clusters), loaded via
+`sentrix_contracts` from each device's `topology_ref`. It materializes
+topology-dependent proxies from the raw magnetic field per cluster — it never
+persists them into canonical Silver, which stays raw-only.
+
+```python
+result = Pipeline().run(MaterializationRequest(
+    sync_result=sync_result, session=session, out_root=Path("gold"),
+    formats=("derived",)))
+```
+
+Output under `format=derived/` — one Parquet per magnetic device with, per cluster:
+`derived.<cluster>.normal_proxy`, `.shear_x`, `.shear_y`, `.shear_mag`,
+`.centroid_x_m`, `.centroid_y_m`. These are ΔB relative to a per-sensor median
+baseline. The file's KV metadata records the formula registry, `derived_version`,
+the descriptor hash, and the cluster→sensor map, so every column is reproducible and
+never mistaken for measured truth. Requires a topology descriptor in session
+provenance (`topology_ref` / `topology_hash`) and the `sentrix_contracts` package.
+
+### Workflow 7 — Inspect a dataset
 
 ```bash
 sentrixdataengine inspect --dataset "gold/dataset=<id>/version=0.1.0"
@@ -167,7 +202,7 @@ print(summarize_canonical(result.canonical))   # from the in-memory table
 Reports `n_grid`, `coverage_min`, per-stream coverage / confidence_mean / value
 range, plus `qa_verdict` and `content_hash` from the manifest.
 
-### Workflow 7 — Compare dataset versions
+### Workflow 8 — Compare dataset versions
 
 ```bash
 sentrixdataengine diff --a "gold/.../version=0.1.0" --b "gold/.../version=0.2.0"
@@ -203,8 +238,11 @@ on the `MaterializationRequest`. Bare `.parquet` paths are auto-normalized to
 
 **Cause:** a stream's resolved payload shape disagrees with the descriptor's
 `payload_shape`, or array lengths don't match the grid. **Fix:** confirm the
-descriptor `payload_shape` matches the actual columns the resolver pulls (e.g.
-`bmm350_cluster_uT` → 21×3 columns `tactile.bNN.{bx,by,bz}_uT`).
+descriptor `payload_shape` matches the actual columns the resolver pulls. The
+resolver derives those from the producer file's KV sensor order (e.g.
+`bmm350_cluster_uT` → one `mag.<sensor_id>.{bx,by,bz}_uT` triple per `bmm_sensor_ids`
+entry), so a mismatch usually means the descriptor's shape and the file's declared
+sensor count disagree.
 
 ### Failed QA gate (`BLOCKED` / `NEEDS_REVIEW`)
 Check `qa_report.json` → `detail` and `integrity`/`quality`. Common hard-fails
@@ -219,7 +257,7 @@ Check `qa_report.json` → `detail` and `integrity`/`quality`. Common hard-fails
 bands in `configs/qa_thresholds.yaml`.
 
 ### Unsupported exporter
-**Symptom:** `KeyError: unknown exporter 'foo'; registered: ['hdf5', 'lerobot', 'mcap', 'parquet', 'rlds']`
+**Symptom:** `KeyError: unknown exporter 'foo'; registered: ['derived', 'hdf5', 'lerobot', 'mcap', 'parquet', 'rlds']`
 
 **Fix:** request a registered format. List them with `sentrixdataengine formats`
 or `sentrixdataengine.exporters.registered_exporters()`.

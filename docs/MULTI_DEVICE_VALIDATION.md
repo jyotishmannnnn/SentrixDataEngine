@@ -6,7 +6,7 @@ single-device path exercised by the unit tests.
 
 **Artifact:** `benchmarks/multi_device_benchmark.py` (deterministic, seed=7).
 **Durable check:** `tests/test_multi_device.py` (7 assertions, part of the suite —
-**31 passed** total). Reproduce with `python benchmarks/multi_device_benchmark.py`.
+**41 passed** total). Reproduce with `python benchmarks/multi_device_benchmark.py`.
 
 > Scope note: this is validation only. No new exporters, formats, or architecture
 > were added. Two genuine multi-device defects in existing exporters were found and
@@ -187,7 +187,7 @@ Both were latent because every prior test used a single device with a unique
    is retained verbatim in each message's `t_ref_us`.
 
 Regression coverage: `tests/test_multi_device.py` plus the unchanged single-device
-suite (**31 passed** total).
+suite (**41 passed** total).
 
 ---
 

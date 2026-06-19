@@ -30,6 +30,16 @@ def write_datacard(path: Path, spec: DatasetSpec, table: CanonicalTable,
         lines.append(
             f"| {s.stream_id} | {s.device_id} | {s.payload_kind} | "
             f"{list(s.shape)} | {s.units} | {s.kernel} | {s.coverage():.3f} |")
+
+    topo = table.extra.get("topology") or []
+    if topo:
+        lines += ["", "## Topology", "",
+                  "Hardware-revision descriptor each device's streams were produced under.",
+                  "", "| device | descriptor | hash |", "|---|---|---|"]
+        for t in topo:
+            lines.append(f"| {t['device_id']} | {t.get('topology_ref') or '—'} | "
+                         f"`{(t.get('topology_hash') or '—')}` |")
+
     lines += ["", "## Formats", ""]
     for e in exports:
         lines.append(f"- **{e.format}** — {e.frame_count} frames, "

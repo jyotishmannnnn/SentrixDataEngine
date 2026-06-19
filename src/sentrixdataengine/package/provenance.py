@@ -54,6 +54,7 @@ def _sign(root_hex: str) -> tuple[str, str, bool]:
 def stamp_provenance(files: list[Path], sidecar_path: Path, *, dataset_id: str,
                      version: str, session_id: str, schema_version: str,
                      source_episode_hashes: list[str],
+                     topology: list[dict] | None = None,
                      customer_id: str | None = None) -> ProvenanceResult:
     file_hashes = {str(p): sha256_file(p) for p in files if Path(p).is_file()}
     root = merkle_root(sorted(file_hashes.values()))
@@ -62,6 +63,7 @@ def stamp_provenance(files: list[Path], sidecar_path: Path, *, dataset_id: str,
         "dataset_id": dataset_id, "version": version, "session_id": session_id,
         "schema_version": schema_version, "customer_id": customer_id,
         "source_episode_hashes": source_episode_hashes,
+        "topology": topology or [],          # hardware-revision descriptor traceability
         "merkle_root": root, "signature": signature, "algorithm": algorithm,
         "signed": signed, "file_hashes": file_hashes,
     }

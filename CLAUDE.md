@@ -53,11 +53,31 @@ episode_metadata.json; real is_first/is_last/is_terminal; neutral reward/discoun
 `hdf5` (needs h5py; resizable/chunked/compressed). All are pure projections of the
 CanonicalTable.
 
+`derived` (opt-in; needs `sentrix_contracts`) — the ONLY exporter that consumes the
+topology descriptor's SPATIAL parts (positions, clusters), loaded via the session's
+`topology_ref`. Materializes topology-DEPENDENT proxies per cluster from raw B:
+`derived.<cluster>.{normal_proxy, shear_x, shear_y, shear_mag, centroid_x_m,
+centroid_y_m}` (ΔB vs per-sensor median baseline). Records formula + `derived_version`
++ descriptor hash + cluster map in KV meta. Canonical Silver stays raw-only; request
+via `formats=("derived",)`. Topology-independent signals (|B|, dB) are recomputable
+anywhere and not materialized here. Raises if no topology provenance / no magnetic
+stream. Validated on real `press`: contacted-finger cluster normal proxy dominates.
+
 ## Resolvers (`resolve/`)
 
-`ParquetPayloadResolver` (`parquet://`, `file://` — maps payload_kind to Sim columns),
-`McapPayloadResolver` (`mcap://` — maps payload_kind to Sim channels). Registry in
-`resolver.py`; `default_registry()` wires both.
+`ParquetPayloadResolver` (`parquet://`, `file://`), `McapPayloadResolver` (`mcap://`).
+Registry in `resolver.py`; `default_registry()` wires both.
+
+**Topology-driven (Migration Phase 3, done).** The parquet resolver is
+**self-describing**: it reads per-modality sensor order (`bmm_sensor_ids` /
+`lis_sensor_ids`) from the parquet KV metadata (`sentrixsim_meta` /
+`sentrix_capture_meta`) and builds canonical sensor_id-keyed columns
+(`mag.<sid>.{bx,by,bz}_uT`, `dyn.<sid>.{ax,ay,az}_g`, `dyn.<sid>.temp_c`).
+`payload_kind` selects the modality; the column SET + ORDER come from the file, so
+ANY sensor count resolves with no code change (verified: Mark2_v1 21/3 and a 6/1
+revision both resolve from real Sim output). Pre-Phase-1 `tactile.bNN` /
+`dyn.<finger>` datasets still resolve via a legacy fallback. The MCAP resolver is
+array-based (channel payload fields) and already count-agnostic.
 
 ## Validators (`validate/`)
 
@@ -74,6 +94,13 @@ provenance.sidecar.json, DATACARD.md, qa_report.json}`. Provenance: SHA-256 per 
 → Merkle root → Ed25519 signature (HMAC-SHA256 fallback flagged `signed=False`).
 `versioning.content_hash` = order-independent hash → reproducibility. `manifest.py`
 links back to the Session and appends one `ExportRecord` per format.
+
+**Topology provenance (Phase 3 extra, done).** Per-device `{device_id, topology_ref,
+topology_hash}` is read from the Session's `DeviceDescriptor.topology_ref/hash`
+(`pipeline._topology_provenance`) into `canonical.extra["topology"]` and stamped into
+the Silver KV (`b"topology"`), `manifest.json`, `provenance.sidecar.json`, and the
+datacard's `## Topology` section. Closes the loop dataset → `descriptor_hash` → exact
+hardware revision. Empty list when no descriptor declares it (synthetic fixtures).
 
 ## Inspection (`inspect/`)
 
@@ -110,7 +137,7 @@ entitlement/watermark await the catalog.
   validation + gate, packaging (Merkle/Ed25519, content hash, datacard, ExportRecord).
 - **V2 complete:** HDF5 + RLDS exporters, mcap resolver, LeRobot v2/v3 flag +
   info.json check, inspect/diff CLI, format_options, dataset profiles.
-- **24 tests passing** (`pytest tests -q`).
+- **41 tests passing** (`pytest tests -q`).
 - **V3 blocked by upstream requirements:** video/AV1 (needs vision stream),
   per-licensee watermark (needs catalog), redaction seam, Rerun `.rrd` mirror,
   streaming materialization. Sub-frame bucketing is built+tested but inactive in the

@@ -49,6 +49,7 @@ def build_arrow(table: CanonicalTable) -> pa.Table:
         b"streams": json.dumps(stream_meta).encode(),
         b"source_episode_hashes": json.dumps(
             table.extra.get("source_episode_hashes", [])).encode(),
+        b"topology": json.dumps(table.extra.get("topology", [])).encode(),
     }
     arrow = pa.table(data)
     return arrow.replace_schema_metadata(schema_meta)

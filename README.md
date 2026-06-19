@@ -13,12 +13,13 @@ synchronization infrastructure and the formats robotics/ML teams actually train 
 
 ## Overview
 
-The Sentrix data path has three repositories with strict, non-overlapping
-responsibilities:
+The Sentrix data path has four repositories (plus the shared `sentrix_contracts`
+layer) with strict, non-overlapping responsibilities:
 
 | Repo | Role | Produces |
 |---|---|---|
 | **SentrixSim** | Forward simulator for the Mark 2 visuotactile glove | Raw per-device episode streams (Parquet/MCAP) |
+| **SentrixCapture** | Real-hardware capture for the same glove | Raw per-device episode streams (same self-describing artifact as SentrixSim) |
 | **SentrixSync** | Multi-device timeline synchronization | An in-memory `SyncResult` (reference grid + as-of join indices + confidence) and a `Session` manifest |
 | **SentrixDataEngine** | **This repo** — dataset materialization → export → validation → packaging | Silver canonical table + Gold format exports + manifest + provenance |
 
@@ -35,6 +36,10 @@ SentrixDataEngine is, concretely, four layers:
 - **Packaging layer** — Gold directory layout, dataset manifest, Merkle +
   Ed25519 provenance sidecar, data card, reproducible content hash, and an
   append-only `ExportRecord` write-back into the originating `Session`.
+  Per-device topology provenance (`device_id` → `topology_ref` → `topology_hash`,
+  read from each `DeviceDescriptor`) is carried into the Silver KV metadata, the
+  manifest, the Merkle-signed provenance sidecar, and the data card — closing the
+  lineage from a delivered dataset to the exact hardware revision it was produced on.
 
 ### What SentrixDataEngine is NOT
 
@@ -51,10 +56,10 @@ SentrixDataEngine is, concretely, four layers:
 ## Architecture
 
 ```
-┌──────────────┐     raw episodes        ┌──────────────┐
-│  SentrixSim  │ ──────(parquet/mcap)───▶ │  SentrixSync │
-└──────────────┘                          └──────┬───────┘
-   (simulate one device)        synchronize N devices │
+┌──────────────────────┐  raw episodes        ┌──────────────┐
+│ SentrixSim /         │ ───(parquet/mcap)───▶ │  SentrixSync │
+│ SentrixCapture (HW)  │                       └──────┬───────┘
+└──────────────────────┘     synchronize N devices    │
                                                        │  SyncResult (in-memory):
                                                        │    timeline.grid_us
                                                        │    per_stream StreamAlignment (join indices)
@@ -78,10 +83,11 @@ SentrixDataEngine is, concretely, four layers:
 ```
 
 **The boundary is the `SyncResult` / `Session` object.** SentrixDataEngine imports
-SentrixSync types (read-only) and never imports SentrixSim — it reaches raw bytes
-only by resolving the opaque `payload_ref` URIs SentrixSync already recorded
-(e.g. `parquet://<abs>#stream=tactile_field&row=12`). The only write-back is
-appending an `ExportRecord` to a `Session` (additive, contract-allowed).
+SentrixSync types (read-only) and never imports the producers (SentrixSim or
+SentrixCapture) — it reaches raw bytes only by resolving the opaque `payload_ref`
+URIs SentrixSync already recorded (e.g.
+`parquet://<abs>#stream=tactile_field&row=12`). The only write-back is appending an
+`ExportRecord` to a `Session` (additive, contract-allowed).
 
 ---
 
@@ -90,12 +96,13 @@ appending an `ExportRecord` to a `Session` (additive, contract-allowed).
 | Capability | Module | Notes |
 |---|---|---|
 | **Canonical Silver materialization** | `materialize/{projector,canonical,silver_writer}.py` | One in-memory `CanonicalTable` + one Silver Parquet; every export projects from it |
-| **Payload resolution** | `resolve/{parquet,mcap}_resolver.py` | `parquet://`, `file://`, `mcap://`; maps `payload_kind` → columns/channels |
+| **Payload resolution** | `resolve/{parquet,mcap}_resolver.py` | `parquet://`, `file://`, `mcap://`; self-describing — reads each producer file's per-modality sensor order from KV metadata and builds sensor_id-keyed columns, so any sensor count resolves with no code change (legacy fixed-column layout still read via a fallback) |
 | **Confidence propagation** | `materialize/confidence.py` | Carries SentrixSync's three components (source/clock/interp) + export scalar `source*clock*interp` |
 | **Sub-frame tactile bucketing** | `materialize/subframe.py` | Fixed-`R` `[R,*shape]` burst per anchor frame; reuses `sentrixsync.sync.join.subframe_buckets` (the manual's premium-fidelity rule) |
 | **Dataset validation** | `validate/{schema,timeline,metadata,confidence}_check.py` | Shapes, monotonic grid, bounded step, no fabricated gaps, confidence ∈ [0,1] |
 | **QA release gate** | `validate/release_gate.py` | `CERTIFIED/RELEASE/NEEDS_REVIEW/BLOCKED`; thresholds in `configs/qa_thresholds.yaml`; inherits Sync verdict as a ceiling |
 | **Provenance** | `package/provenance.py` | SHA-256 per file → Merkle root → Ed25519 signature (HMAC fallback flagged unsigned) |
+| **Topology provenance** | `package/{manifest,provenance,datacard}.py`, `materialize/silver_writer.py` | Per-device `{device_id, topology_ref, topology_hash}` written into Silver KV (`topology`), `manifest.json`, the signed `provenance.sidecar.json`, and the data card (`## Topology`) — dataset → descriptor → hardware revision lineage |
 | **Reproducibility** | `package/versioning.py` | Order-independent content hash; same inputs → identical hash |
 | **ExportRecord write-back** | `package/manifest.py` | Appends one `ExportRecord` per format into the `Session` |
 | **LeRobot export** | `exporters/lerobot.py` | v3 (default) / v2 layout flag; `info.json` + `episodes.jsonl` + chunked parquet; optional lerobot-version cross-check |
@@ -103,6 +110,7 @@ appending an `ExportRecord` to a `Session` (additive, contract-allowed).
 | **RLDS export** | `exporters/rlds.py` | Portable step-dict (`steps.parquet` + `episode_metadata.json`); real `is_first/is_last/is_terminal` |
 | **HDF5 export** | `exporters/hdf5.py` | robomimic-style resizable/chunked/compressed datasets; bounded writer memory |
 | **Parquet export** | `exporters/parquet.py` | Canonical columnar passthrough |
+| **Derived export** (opt-in) | `exporters/derived.py` | Topology-dependent proxies per cluster from raw B (`derived.<cluster>.{normal_proxy,shear_x,shear_y,shear_mag,centroid_x_m,centroid_y_m}`); the only component that consumes the descriptor's spatial layout (positions/clusters via `sentrix_contracts`). Records formula + `derived_version` + descriptor hash + cluster map; canonical Silver stays raw-only |
 | **Dataset inspection** | `inspect/summary.py` | Coverage, confidence, value ranges, QA verdict, content hash |
 | **Dataset diffing** | `inspect/diff.py` | Content-hash identity, per-stream coverage/confidence deltas |
 
@@ -241,8 +249,8 @@ SentrixDataEngine/
 │   ├── cli.py                     # typer CLI (version/formats/validate/inspect/diff)
 │   ├── resolve/                   # payload resolution (SentrixSync deferred item #1)
 │   │   ├── resolver.py            #   ResolverRegistry + scheme dispatch
-│   │   ├── parquet_resolver.py    #   parquet:// / file:// → ndarray (Sim column layout)
-│   │   └── mcap_resolver.py       #   mcap:// → ndarray (Sim channel layout)
+│   │   ├── parquet_resolver.py    #   parquet:// / file:// → ndarray (self-describing, sensor_id-keyed)
+│   │   └── mcap_resolver.py       #   mcap:// → ndarray (producer channel layout)
 │   ├── materialize/               # Silver materialization (deferred items #2–#4)
 │   │   ├── canonical.py           #   CanonicalTable / CanonicalStream (the source of truth)
 │   │   ├── projector.py           #   apply StreamAlignment join indices → canonical
@@ -251,7 +259,7 @@ SentrixDataEngine/
 │   │   └── silver_writer.py       #   write canonical → Silver Parquet
 │   ├── exporters/                 # Gold projections
 │   │   ├── base.py                #   Exporter ABC + @register_exporter registry
-│   │   ├── parquet.py  lerobot.py  mcap.py  rlds.py  hdf5.py
+│   │   ├── parquet.py  lerobot.py  mcap.py  rlds.py  hdf5.py  derived.py
 │   ├── validate/                  # validation + QA
 │   │   ├── schema_check.py  timeline_check.py  metadata_check.py  confidence_check.py
 │   │   └── release_gate.py        #   composes QAReport verdict
@@ -266,10 +274,11 @@ SentrixDataEngine/
 │   └── hooks/                     # Phase-4 seams (local no-ops)
 │       ├── authorize.py  watermark.py
 └── tests/
-    ├── conftest.py                # fixtures: Sim-layout parquet + real SyncResult
-    ├── test_resolver.py  test_projector.py  test_subframe.py
+    ├── conftest.py                # fixtures: self-describing producer parquet + real SyncResult
+    ├── test_resolver.py  test_resolver_topology.py  test_projector.py  test_subframe.py
     ├── test_release_gate.py  test_provenance.py  test_pipeline_e2e.py
-    ├── test_exporters_v2.py  test_mcap_resolver.py  test_inspect.py
+    ├── test_exporters_v2.py  test_derived_exporter.py  test_topology_provenance.py
+    ├── test_mcap_resolver.py  test_inspect.py  test_multi_device.py
 ```
 
 ---
@@ -284,13 +293,14 @@ SentrixDataEngine/
 | **RLDS** | World/reward-model + RL (step-dict; portable, TF-free) | ✅ Stable (TFDS wrapper deferred) |
 | **HDF5** | robomimic-compatible single-lab pipelines | ✅ Stable (needs `h5py` extra) |
 | **Parquet** (Gold passthrough) | Plain columnar analytics | ✅ Stable |
+| **Derived** (opt-in, `formats=("derived",)`) | Topology-dependent per-cluster proxies from raw B (normal/shear/centroid) | ✅ Stable (needs a topology descriptor + `sentrix_contracts`) |
 
 ---
 
 ## Testing
 
 The suite uses real `SyncResult` objects (built via `sentrixsync.sync.engine.synchronize`)
-over a synthetic SentrixSim-layout Parquet fixture — no mocks of the boundary.
+over a synthetic self-describing producer-layout Parquet fixture — no mocks of the boundary.
 
 ```bash
 pip install -e ".[dev]"          # pytest + mcap + h5py + cryptography
@@ -300,14 +310,16 @@ pytest tests -q
 Expected:
 
 ```
-........................                                                 [100%]
-24 passed
+.........................................                                [100%]
+41 passed
 ```
 
-Coverage by area: payload resolution, projector/join application, sub-frame
-bucketing, release gate (including BLOCKED on fabricated gaps and unsigned
-lineage), provenance/Merkle, end-to-end pipeline + reproducible content hash,
-V2 exporters (HDF5/RLDS/LeRobot layout), MCAP resolver, inspect/diff.
+Coverage by area: payload resolution (including self-describing topology-driven
+columns), projector/join application, sub-frame bucketing, release gate (including
+BLOCKED on fabricated gaps and unsigned lineage), provenance/Merkle, topology
+provenance, end-to-end pipeline + reproducible content hash, V2 exporters
+(HDF5/RLDS/LeRobot layout), derived exporter, MCAP resolver, inspect/diff,
+multi-device.
 
 ---
 
@@ -329,6 +341,11 @@ V2 exporters (HDF5/RLDS/LeRobot layout), MCAP resolver, inspect/diff.
 - LeRobot v2/v3 layout flag + lerobot-version `info.json` cross-check
 - `inspect` + `diff` CLI commands
 - Per-format `format_options`; dataset profiles in `configs/dataset_profiles/`
+- Self-describing, topology-driven payload resolution (sensor_id-keyed columns from
+  producer KV metadata; legacy fixed-column layout via fallback)
+- Topology provenance (per-device `topology_ref`/`topology_hash`) closed through
+  Silver KV, manifest, signed sidecar, and data card
+- Opt-in `derived` exporter (topology-dependent per-cluster proxies)
 
 ### Future — V3 (blocked on upstream inputs, not effort)
 

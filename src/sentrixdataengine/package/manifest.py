@@ -13,7 +13,8 @@ from ..contracts import DatasetSpec, ExportResult, QAReport
 
 
 def write_manifest(path: Path, spec: DatasetSpec, exports: list[ExportResult],
-                   qa: QAReport, provenance, *, content_hash: str) -> Path:
+                   qa: QAReport, provenance, *, content_hash: str,
+                   topology: list[dict] | None = None) -> Path:
     manifest = {
         "dataset_id": spec.dataset_id,
         "version": spec.version,
@@ -23,6 +24,7 @@ def write_manifest(path: Path, spec: DatasetSpec, exports: list[ExportResult],
         "source_session_id": spec.session_id,
         "reference_clock_id": spec.reference_clock_id,
         "grid_rate_hz": spec.grid_rate_hz,
+        "topology": topology or [],
         "content_hash": content_hash,
         "qa_verdict": qa.gate_verdict,
         "provenance": {"merkle_root": provenance.merkle_root,
