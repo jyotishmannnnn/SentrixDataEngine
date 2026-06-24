@@ -152,16 +152,19 @@ class DerivedExporter(Exporter):
         r = np.linalg.norm(dB, axis=2)                     # [T, M]  response magnitude
 
         cols: dict[str, np.ndarray] = {}
+        # Canonical cluster math shared with SentrixViz (VIZ-P5 seam): one
+        # implementation in sentrix_contracts.derived drives both batch + display.
+        from sentrix_contracts.derived import (
+            normal_proxy, response_weighted_centroid, shear_magnitude, shear_vector)
+
         with np.errstate(invalid="ignore", divide="ignore"):
             for cid, idxs in clusters.items():
                 rc = r[:, idxs]                            # [T, m]
-                normal = np.nanmean(rc, axis=1)
-                shear = np.nanmean(dB[:, idxs, :2], axis=1)        # [T, 2]
-                shear_mag = np.linalg.norm(shear, axis=1)
-                pos = pos_xy[idxs]                                  # [m, 2]
-                wsum = np.nansum(rc, axis=1)                        # [T]
-                num = np.nansum(rc[:, :, None] * pos[None, :, :], axis=1)  # [T, 2]
-                centroid = np.where(wsum[:, None] > 0, num / wsum[:, None], np.nan)
+                pos = pos_xy[idxs]                         # [m, 2]
+                normal = normal_proxy(rc)                          # [T]
+                shear = shear_vector(dB[:, idxs, :2])              # [T, 2]
+                shear_mag = shear_magnitude(shear)                 # [T]
+                centroid = response_weighted_centroid(rc, pos)     # [T, 2]
                 pre = f"derived.{cid}"
                 cols[f"{pre}.normal_proxy"] = normal
                 cols[f"{pre}.shear_x"] = shear[:, 0]

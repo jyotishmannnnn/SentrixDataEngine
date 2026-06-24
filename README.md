@@ -212,7 +212,22 @@ print(result.qa.gate_verdict)              # e.g. "CERTIFIED"
 print(result.layout.base)                  # gold/dataset=<id>/version=<semver>/
 ```
 
-### 4. Inspect
+### 4. Materialize from a persisted bundle (CLI)
+
+Since SentrixSync **SYNC-1** persists a `SyncResult` (+ `Session`) bundle to disk,
+the **DE-CLI-1** `materialize` command runs the full pipeline with no live
+SentrixSync process:
+
+```bash
+sentrixdataengine materialize \
+    --bundle <syncresult_bundle_dir> \
+    --out gold \
+    --formats parquet,lerobot,mcap \
+    --version 0.1.0
+# prints JSON: verdict, dataset path, silver, content_hash, manifest, provenance
+```
+
+### 5. Inspect / validate / diff
 
 ```bash
 sentrixdataengine inspect --dataset "gold/dataset=<id>/version=0.1.0"
@@ -220,10 +235,9 @@ sentrixdataengine validate --dataset "gold/dataset=<id>/version=0.1.0"
 sentrixdataengine diff --a <ver_dir_A> --b <ver_dir_B>
 ```
 
-> **CLI scope:** end-to-end `materialize` is driven from Python because it requires
-> an in-memory `SyncResult` (a `Session` manifest alone does not carry the timeline
-> grid). The CLI covers `version`, `formats`, `validate`, `inspect`, `diff`. A
-> manifest-only `materialize` entry point lands once timelines are persisted on disk.
+> **CLI scope:** `version`, `formats`, `materialize` (from a persisted bundle),
+> `validate`, `inspect`, `diff`. The Python `Pipeline().run(...)` path remains for
+> materializing directly from an in-memory `SyncResult` (e.g. inside ORCH-1).
 
 ---
 

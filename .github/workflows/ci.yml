@@ -1,0 +1,63 @@
+name: SentrixDataEngine CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# DataEngine depends on sentrix-contracts (runtime) AND sentrixsync (runtime:
+# the Sync->DataEngine handoff). Both are checked out and installed editable
+# before DataEngine, in dependency order, so pip never reaches an index for them.
+env:
+  SENTRIX_REF: ${{ vars.SENTRIX_REF || 'main' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Checkout SentrixDataEngine
+        uses: actions/checkout@v4
+        with:
+          path: SentrixDataEngine
+
+      - name: Checkout SentrixContracts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/SentrixContracts
+          ref: ${{ env.SENTRIX_REF }}
+          path: SentrixContracts
+
+      - name: Checkout SentrixSync
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/SentrixSync
+          ref: ${{ env.SENTRIX_REF }}
+          path: SentrixSync
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install sentrix-contracts (keystone, first)
+        run: python -m pip install -e ./SentrixContracts
+
+      - name: Install sentrixsync (runtime dep)
+        run: python -m pip install -e ./SentrixSync
+
+      - name: Install SentrixDataEngine + dev extras
+        run: python -m pip install -e "./SentrixDataEngine[dev]"
+
+      - name: Show resolved environment
+        run: python -m pip list
+
+      - name: Run tests
+        working-directory: SentrixDataEngine
+        run: python -m pytest

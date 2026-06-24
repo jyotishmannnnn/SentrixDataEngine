@@ -7,15 +7,10 @@ full end-to-end export through SentrixDataEngine.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-# benchmarks/ is a sibling of tests/ — make it importable.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
-
-from multi_device_benchmark import run  # noqa: E402
+# benchmarks/ is on the pytest pythonpath (see pyproject [tool.pytest.ini_options]).
+from multi_device_benchmark import run
 
 
 @pytest.fixture(scope="module")

@@ -10,6 +10,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary (Internal Engineering)" }
 dependencies = [
+    "sentrix-contracts>=0.1.0",
+    # sentrixsync is a real runtime dependency: the Sync->DataEngine handoff
+    # (materialize/subframe, package/manifest, materialize/projector, contracts)
+    # imports sentrixsync types. Declared here so clean installs resolve it.
+    "sentrixsync>=0.3.0",
     "numpy>=1.26",
     "pyarrow>=14",
     "pyyaml>=6.0",
@@ -30,3 +35,10 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 sentrixdataengine = ["../configs/*.yaml", "../configs/dataset_profiles/*.yaml"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+pythonpath = ["src", "benchmarks"]
+addopts = "-ra"
+filterwarnings = ["default"]
